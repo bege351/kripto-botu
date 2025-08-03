@@ -1,0 +1,58 @@
+import streamlit as st, pandas as pd, ccxt
+from ta.momentum import RSIIndicator
+from ta.trend import MACD, EMAIndicator
+
+EXCHANGES = ["binance","okx","bybit","kucoin","coinbase","mexc"]
+
+@st.cache_data(ttl=300)
+def scan(tf, vol_min, rsi_min, ema_s, ema_l, macd_pos):
+    hits=[]
+    for ex_id in EXCHANGES:
+        ex = getattr(ccxt, ex_id)({'enableRateLimit': True})
+        try:
+            markets = ex.load_markets()
+        except Exception:
+            continue
+        for m in markets.values():
+            if m["quote"] not in ("USDT","USD"):
+                continue
+            try:
+                df = pd.DataFrame(
+                    ex.fetch_ohlcv(m["symbol"], tf, limit=150),
+                    columns=["ts","o","h","l","c","v"]
+                )
+                vol = df.v.iloc[-1] * df.c.iloc[-1]
+                if vol < vol_min:
+                    continue
+                if RSIIndicator(df.c,14).rsi().iloc[-1] < rsi_min:
+                    continue
+                if macd_pos and MACD(df.c).macd_diff().iloc[-1] <= 0:
+                    continue
+                if EMAIndicator(df.c, ema_s).ema_indicator().iloc[-1] <= \
+                   EMAIndicator(df.c, ema_l).ema_indicator().iloc[-1]:
+                    continue
+                hits.append({
+                    "exchange": ex_id,
+                    "symbol": m["symbol"],
+                    "price": df.c.iloc[-1],
+                    "volume_usd": round(vol,2)
+                })
+            except Exception:
+                continue
+    return pd.DataFrame(hits)
+
+st.title("📊 Crypto Screener (RSI / EMA / MACD)")
+tf     = st.selectbox("Timeframe",["1m","5m","15m","1h","4h"],index=2)
+volmin = st.number_input("Min 15 m Volume (USDT)", 1000, 10_000_000, 1_000_000, step=100000)
+rsi    = st.slider("RSI minimum",0,100,55)
+ema_s  = st.number_input("EMA Short",5,200,20)
+ema_l  = st.number_input("EMA Long",5,400,50)
+macd_p = st.checkbox("MACD histogram > 0",True)
+
+if st.button("SCAN"):
+    with st.spinner("Scanning exchanges…"):
+        df = scan(tf, volmin, rsi, ema_s, ema_l, macd_p)
+    st.success(f"Found {len(df)} matches")
+    st.dataframe(df, use_container_width=True)
+    if not df.empty:
+        st.download_button("Download CSV", df.to_csv(index=False), "screener.csv","text/csv")
